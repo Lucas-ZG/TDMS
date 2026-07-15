@@ -1,0 +1,101 @@
+@rem Lucas.ZhuGe
+@echo off
+chcp 65001 >nul
+setlocal EnableExtensions EnableDelayedExpansion
+
+echo 🔍 搜尋當前資料夾內的 .py 檔案...
+
+set "count=0"
+set "lastpy="
+
+for %%f in (*.py) do (
+    set /a count+=1
+    set "lastpy=%%~ff"
+)
+
+if %count%==0 (
+    echo ❌ 找不到任何 .py 檔案，請確認資料夾內是否有 Python 程式。
+    pause
+    exit /b
+)
+
+:: 產生一個臨時清單檔，存放要打包的檔案清單（每行一個完整路徑）
+set "SELFILE=%TEMP%\selected_py_%RANDOM%.txt"
+if exist "%SELFILE%" del /f /q "%SELFILE%" >nul 2>&1
+
+if %count% GTR 1 (
+    echo ⚠️ 發現多個 .py 檔案，請選擇要打包的檔案（可多選）...
+
+    :: 使用 PowerShell 的 OpenFileDialog 讓使用者多選
+    powershell -NoProfile -Command ^
+        "Add-Type -AssemblyName System.Windows.Forms; " ^
+        "$fd = New-Object System.Windows.Forms.OpenFileDialog; " ^
+        "$fd.InitialDirectory = (Get-Location).Path; " ^
+        "$fd.Filter = 'Python (*.py)|*.py'; " ^
+        "$fd.Multiselect = $true; " ^
+        "$fd.Title = '選擇要打包的 .py 檔案（可多選）'; " ^
+        "if ($fd.ShowDialog() -eq 'OK') { $fd.FileNames | ForEach-Object { $_ } }" > "%SELFILE%"
+
+    if not exist "%SELFILE%" (
+        echo ❌ 未選擇任何檔案。
+        pause
+        exit /b
+    )
+
+    for /f "usebackq delims=" %%A in ("%SELFILE%") do (
+        if not "%%~A"=="" call :BUILD_ONE "%%~fA"
+    )
+) else (
+    echo ✅ 準備打包: "%lastpy%"
+    call :BUILD_ONE "%lastpy%"
+)
+
+if exist "%SELFILE%" del /f /q "%SELFILE%" >nul 2>&1
+echo ✅ 全部打包完成。
+pause
+exit /b
+
+
+:BUILD_ONE
+:: %~1 = 要打包的 .py 完整路徑
+set "PYFILE=%~1"
+set "BASENAME=%~n1"
+echo.
+echo ===============================
+echo 🚧 正在打包: "%PYFILE%"
+echo ===============================
+
+:: 清理舊檔
+rmdir /s /q build >nul 2>&1
+rmdir /s /q dist >nul 2>&1
+del /f /q "%BASENAME%.spec" >nul 2>&1
+
+:: 執行打包
+pyinstaller --noconsole --onefile "%PYFILE%"
+if errorlevel 1 (
+    echo ❌ 打包失敗: "%PYFILE%"
+    goto :EOF
+)
+
+:: 移動輸出（PyInstaller onefile 預設產生 dist\basename.exe）
+if exist "dist\%BASENAME%.exe" (
+    move /y "dist\%BASENAME%.exe" ".\%BASENAME%.exe" >nul
+    echo ✅ 打包完成！已輸出為: "%BASENAME%.exe"
+) else (
+    :: 若未找到預期輸出，嘗試移動 dist 內唯一的 exe
+    set "foundexe="
+    for %%E in (dist\*.exe) do set "foundexe=%%~fE"
+    if defined foundexe (
+        move /y "!foundexe!" ".\%BASENAME%.exe" >nul
+        echo ✅ 打包完成（重新命名）！已輸出為: "%BASENAME%.exe"
+    ) else (
+        echo ⚠️ 未找到輸出 exe，請檢查 PyInstaller 設定。
+    )
+)
+
+:: 再次清理暫存
+rmdir /s /q build >nul 2>&1
+rmdir /s /q dist >nul 2>&1
+del /f /q "%BASENAME%.spec" >nul 2>&1
+
+goto :EOF

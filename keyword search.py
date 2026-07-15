@@ -146,6 +146,7 @@ class TDMSKeywordSearcher(QWidget):
                 continue
 
             fuzzy_threshold = None
+            fuzzy_threshold_is_default = False
             if "~~" in term:
                 left, right = term.rsplit("~~", 1)
                 left = left.strip()
@@ -155,12 +156,13 @@ class TDMSKeywordSearcher(QWidget):
                         fuzzy_threshold = float(right)
                     except Exception:
                         fuzzy_threshold = 80.0
+                        fuzzy_threshold_is_default = True
                     term = left
 
             term_norm = self.normalize(term)
 
             if "%%" in term_norm:
-                pattern = re.escape(term_norm).replace(r"\%\%", ".*")
+                pattern = ".*".join(re.escape(p) for p in term_norm.split("%%"))
                 rx = re.compile(pattern, re.IGNORECASE)
 
                 def _m(s, _rx=rx):
@@ -177,7 +179,8 @@ class TDMSKeywordSearcher(QWidget):
                     r2 = _try_fuzzy_ratio(s, _t)
                     return max(r1, r2) >= _th
 
-                matchers.append((_m, f"FUZZY({int(th)}):{term}"))
+                tag_suffix = ",預設" if fuzzy_threshold_is_default else ""
+                matchers.append((_m, f"FUZZY({int(th)}{tag_suffix}):{term}"))
                 continue
 
             def _m(s, _t=term_norm):
