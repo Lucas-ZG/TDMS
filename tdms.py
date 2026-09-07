@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QGroupBox, QScrollArea, QHBoxLayout, QFrame, QGridLayout
 )
 from PySide6.QtGui import QFont
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 
 try:
     from nptdms import TdmsFile
@@ -214,6 +214,11 @@ class TDMSFilterApp(QWidget):
                 self.file_paths.append(str(path))
                 add += 1
         self.label_file.setText(f"已選擇 {len(self.file_paths)} 筆資料（本次新增 {add}）")
+
+    def load_initial_tdms_file(self, path: str) -> None:
+        """Load one command-line TDMS file through the existing UI flow."""
+        self._add_files([path])
+        self._rebuild_checklist_from_all_files()
 
     # ---------------- 勾選清單（聯集 & 群組模糊） ----------------
     def _iter_cobra_groups(self, td: TdmsFile):
@@ -534,8 +539,26 @@ class TDMSFilterApp(QWidget):
             self.open_files(self.generated_image_paths)
 
 
+def command_line_tdms_path(argv: List[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Validate the optional single-file launch argument without changing no-arg behavior."""
+    if len(argv) <= 1:
+        return None, None
+
+    candidate = Path(argv[1]).expanduser()
+    if candidate.suffix.lower() != TDMS_EXTENSION:
+        return None, f"啟動參數不是 .tdms 檔案：\n{candidate}"
+    if not candidate.is_file():
+        return None, f"找不到啟動參數指定的 TDMS 檔案：\n{candidate}"
+    return str(candidate.resolve()), None
+
+
 if __name__ == "__main__":
+    initial_tdms_path, launch_error = command_line_tdms_path(sys.argv)
     app = QApplication(sys.argv)
     w = TDMSFilterApp()
     w.show()
+    if initial_tdms_path is not None:
+        QTimer.singleShot(0, lambda: w.load_initial_tdms_file(initial_tdms_path))
+    elif launch_error is not None:
+        QTimer.singleShot(0, lambda: QMessageBox.warning(w, "無法載入 TDMS", launch_error))
     sys.exit(app.exec())
