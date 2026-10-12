@@ -21,6 +21,8 @@ The repository contains three standalone tools:
 - Exports `.xlsx` files and saves `.png` thermal plots beside each source file.
 - Optionally annotates TSD minimum/maximum values, the largest Evap–TSD gap, and the largest Evap–Case gap.
 - Can open generated files with the operating system's default application.
+- Processing runs on a background thread: the window stays responsive, a progress bar and status line show the current file and step, and a Cancel button stops the batch after the current step (files already written are kept).
+- Recovery notices and per-file errors are collected and shown in a single summary dialog when the batch ends (no dialog per file).
 
 #### Keyword Search Tool (`keyword search.py`)
 
@@ -105,6 +107,7 @@ For keyword search:
 - Additional selected channels are exported to Excel but are not added to the plot.
 - PNG plots are generated even when Excel export is disabled.
 - Processing time depends on TDMS file size and channel count.
+- "Open the plot after saving" opens the saved PNG with the default image viewer once, after the batch; the interactive matplotlib window (`plt.show()`) is no longer shown. Plots are drawn with matplotlib's `Figure` (no global pyplot state), so they can be produced on the worker thread.
 - Excel export streams rows with openpyxl `write_only` mode (identical cell contents to the previous `DataFrame.to_excel` output, header style included); on the largest capture the export step measured ~7x faster for the 5 default columns and ~19x faster with all 41 columns selected (machine-dependent).
 
 ### Running the tests
@@ -138,6 +141,8 @@ TDMS Tool Suite 是一組以 Python 開發的桌面工具，用於檢視 TDMS �
 - 在來源檔案旁輸出 `.xlsx` 資料與 `.png` 溫度曲線圖。
 - 可標註 TSD 最高值、最低值、Evap–TSD 最大溫差及 Evap–Case 最大溫差。
 - 可使用作業系統預設程式開啟輸出檔案。
+- 處理在背景執行緒進行：視窗保持可操作，並以進度條與狀態文字顯示目前的檔案與步驟；「取消」按鈕會在目前步驟結束後停止（已寫出的檔案會保留）。
+- 復原提示與各檔錯誤會在整批結束後以單一彙總對話框顯示（不再每檔彈一個）。
 
 #### 關鍵字搜尋工具（`keyword search.py`）
 
@@ -222,6 +227,7 @@ pip install pyinstaller
 - 額外選取的 Channel 只會匯出至 Excel，不會加入圖表。
 - 即使關閉 Excel 匯出，程式仍會產生 PNG 圖表。
 - 處理時間會受到 TDMS 檔案大小與 Channel 數量影響。
+- 勾選「儲存後自動開啟圖檔」時，整批結束後以預設看圖程式開啟已儲存的 PNG（僅開啟一次）；不再出現互動式 matplotlib 視窗（`plt.show()`）。圖表改用 matplotlib 的 `Figure` 繪製（不使用 pyplot 全域狀態），因此可在背景執行緒產生。
 - Excel 匯出改以 openpyxl `write_only` 模式串流寫入（儲存格內容與舊版 `DataFrame.to_excel` 輸出一致，含標題列樣式）；以最大測試檔實測，匯出步驟在預設 5 欄約快 7 倍、勾選全部 41 欄約快 19 倍（實際倍數依機器而異）。
 
 ### 如何執行測試
@@ -238,3 +244,4 @@ python -m unittest discover -s tests -v
 
 - 2026-09-07：`tdms.py` 新增支援命令列參數，可直接載入單一 `.tdms` 檔案（供外部程式呼叫啟動使用）；未帶參數時行為不變，維持原有主視窗與多檔／資料夾選擇流程。
 - 2026-10-12：Excel 匯出（`export_to_excel`）改用 openpyxl `write_only` 串流寫入，輸出內容與舊做法逐儲存格一致；最大測試檔實測匯出步驟約快 7 倍（5 欄）至約 19 倍（41 欄）。新增 `tests/fixtures` 固定測試樣本與回歸測試（讀取、xlsx、PNG、命令列解析、合成復原樣本）。
+- 2026-10-12：處理流程（讀檔／匯出 Excel／繪圖）改在背景執行緒執行：新增進度條、狀態文字與「取消」按鈕，處理期間視窗不再凍結（最大測試檔全選 41 欄實測最大 UI 凍結由約 1.4 s 降到約 0.04 s，3 檔批次由約 4 s 降到約 0.04 s）；復原提示與錯誤改為整批結束後的單一彙總對話框；移除互動式 `plt.show()`，圖表改用 `Figure` 繪製（與舊版 PNG 逐像素相同）。

@@ -50,28 +50,40 @@ class TdmsRecoveryTests(unittest.TestCase):
                 tdms.read_tdms_with_status(str(candidate))
 
     def test_processing_continues_after_a_failed_file(self):
-        plotted = Mock()
-        fake = SimpleNamespace(
-            file_paths=["bad.tdms", "good.tdms", "recovered.tdms"],
-            generated_excel_paths=[1],
-            generated_image_paths=[1],
-            enable_excel=SimpleNamespace(isChecked=lambda: False),
-            auto_open_plot=SimpleNamespace(isChecked=lambda: False),
-            plot_and_save=plotted,
-        )
-        def read_file(path):
+        # Phase 2-B: process_files is asynchronous and shows ONE summary dialog after the batch (instead of one
+        # modal box per file), so the original assertions are kept in equivalent form:
+        #   plotted twice (bad file skipped)            -> render_plot called twice
+        #   one error naming bad.tdms                   -> the single critical dialog contains it
+        #   one recovery notice naming recovered.tdms   -> the same summary contains that line
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        import pandas as pd
+        from PySide6.QtCore import QEventLoop, QTimer
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        window = tdms.TDMSFilterApp()
+        window.file_paths = ["bad.tdms", "good.tdms", "recovered.tdms"]
+        window.enable_excel.setChecked(False)
+        window.auto_open_plot.setChecked(False)
+        def read_file(path, wanted):
             if path == "bad.tdms":
                 raise ValueError("invalid segment")
-            return object(), "recovered" if path == "recovered.tdms" else "normal"
-        fake.read_tdms_file = read_file
-        with patch.object(tdms.QMessageBox, "critical") as critical, patch.object(
-            tdms.QMessageBox, "information") as information:
-            tdms.TDMSFilterApp.process_files(fake)
+            return pd.DataFrame({"TIME": [0.0]}), "recovered" if path == "recovered.tdms" else "normal"
+        plotted = Mock(return_value=None)
+        loop = QEventLoop()
+        window.processing_finished.connect(lambda _summary: loop.quit())
+        QTimer.singleShot(30000, loop.quit)
+        with patch.object(tdms, "_read_frame", side_effect=read_file), patch.object(
+                tdms, "render_plot", plotted), patch.object(tdms.QMessageBox, "critical") as critical, patch.object(
+                tdms.QMessageBox, "information") as information:
+            window.process_files()
+            loop.exec()
         self.assertEqual(plotted.call_count, 2)
         self.assertEqual(critical.call_count, 1)
-        self.assertIn("bad.tdms", critical.call_args.args[2])
-        self.assertEqual(information.call_count, 1)
-        self.assertIn("recovered.tdms", information.call_args.args[2])
+        self.assertIn("bad.tdms：invalid segment", critical.call_args.args[2])
+        self.assertIn("recovered.tdms：" + tdms.RECOVERED_SEGMENT_MESSAGE, critical.call_args.args[2])
+        self.assertEqual(information.call_count, 0)
+        window.close()
 
     def test_channel_scan_warns_about_skipped_file(self):
         fake = SimpleNamespace(

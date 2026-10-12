@@ -216,6 +216,21 @@ def make_window():
     return tdms.TDMSFilterApp()
 
 
+def run_to_completion(window, timeout_ms=60000):
+    """process_files is asynchronous (QThread): run the Qt event loop until the window reports it is finished."""
+    from PySide6.QtCore import QEventLoop, QTimer
+    loop = QEventLoop()
+    results = []
+    window.processing_finished.connect(lambda summary: (results.append(summary), loop.quit()))
+    QTimer.singleShot(timeout_ms, loop.quit)
+    with contextlib.redirect_stdout(io.StringIO()):
+        window.process_files()
+        loop.exec()
+    if not results:
+        raise AssertionError("process_files did not finish within %d ms" % timeout_ms)
+    return results[0]
+
+
 def quiet(func, *args, **kwargs):
     """Run func while swallowing the tool's progress prints."""
     with contextlib.redirect_stdout(io.StringIO()):
@@ -493,7 +508,7 @@ class ProcessFilesIntegrationTests(unittest.TestCase):
             with patch.object(tdms.QMessageBox, "critical", side_effect=boom), \
                     patch.object(tdms.QMessageBox, "information", side_effect=boom), \
                     patch.object(tdms.QMessageBox, "warning", side_effect=boom):
-                quiet(window.process_files)
+                run_to_completion(window)
             xlsx = sorted(Path(directory).glob("*.xlsx"))
             png = sorted(Path(directory).glob("*.png"))
             self.assertEqual(len(xlsx), 1)
@@ -515,7 +530,7 @@ class ProcessFilesIntegrationTests(unittest.TestCase):
             window.file_paths = [str(source)]
             window.enable_excel.setChecked(False)
             window.auto_open_plot.setChecked(False)
-            quiet(window.process_files)
+            run_to_completion(window)
             self.assertEqual(list(Path(directory).glob("*.xlsx")), [])
             self.assertEqual(len(list(Path(directory).glob("*.png"))), 1)
 
