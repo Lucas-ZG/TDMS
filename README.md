@@ -105,6 +105,17 @@ For keyword search:
 - Additional selected channels are exported to Excel but are not added to the plot.
 - PNG plots are generated even when Excel export is disabled.
 - Processing time depends on TDMS file size and channel count.
+- Excel export streams rows with openpyxl `write_only` mode (identical cell contents to the previous `DataFrame.to_excel` output, header style included); on the largest capture the export step measured ~7x faster for the 5 default columns and ~19x faster with all 41 columns selected (machine-dependent).
+
+### Running the tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+- Two small captures are committed under `tests/fixtures`, so the suite runs on a fresh clone (read -> DataFrame, xlsx cell contents, PNG, command-line parsing, synthetic final-segment recovery).
+- Optional large-file checks run only when the 4.99 MB capture (`... 26 09 22 23 09.tdms`) is found: set `TDMS_LARGE_SAMPLE` to its path, or place it in the project's `test file/` folder; otherwise they are skipped with a message.
+- Tests that need the author's original recovery captures (`tests/test_tdms_recovery.py`, Downloads folder) are skipped when those files are missing.
 
 ---
 
@@ -211,7 +222,19 @@ pip install pyinstaller
 - 額外選取的 Channel 只會匯出至 Excel，不會加入圖表。
 - 即使關閉 Excel 匯出，程式仍會產生 PNG 圖表。
 - 處理時間會受到 TDMS 檔案大小與 Channel 數量影響。
+- Excel 匯出改以 openpyxl `write_only` 模式串流寫入（儲存格內容與舊版 `DataFrame.to_excel` 輸出一致，含標題列樣式）；以最大測試檔實測，匯出步驟在預設 5 欄約快 7 倍、勾選全部 41 欄約快 19 倍（實際倍數依機器而異）。
+
+### 如何執行測試
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+- `tests/fixtures` 內附兩個小型測試檔，全新 clone 即可執行（涵蓋讀取成 DataFrame、xlsx 儲存格內容、PNG、命令列參數解析、合成檔的最後一段復原）。
+- 大檔檢查為選用：找到 4.99 MB 的 `... 26 09 22 23 09.tdms` 才會執行——設定環境變數 `TDMS_LARGE_SAMPLE` 指向該檔，或放在專案的 `test file/` 資料夾；找不到時會以訊息跳過。
+- 需要作者原始復原樣本（Downloads 資料夾）的 `tests/test_tdms_recovery.py` 在找不到檔案時會跳過。
 
 ## 更新紀錄
 
 - 2026-09-07：`tdms.py` 新增支援命令列參數，可直接載入單一 `.tdms` 檔案（供外部程式呼叫啟動使用）；未帶參數時行為不變，維持原有主視窗與多檔／資料夾選擇流程。
+- 2026-10-12：Excel 匯出（`export_to_excel`）改用 openpyxl `write_only` 串流寫入，輸出內容與舊做法逐儲存格一致；最大測試檔實測匯出步驟約快 7 倍（5 欄）至約 19 倍（41 欄）。新增 `tests/fixtures` 固定測試樣本與回歸測試（讀取、xlsx、PNG、命令列解析、合成復原樣本）。

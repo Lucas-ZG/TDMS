@@ -534,7 +534,149 @@ class TDMSFilterApp(QWidget):
         folder = os.path.dirname(tdms_path)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = os.path.join(folder, f"{base}_{ts}.xlsx")
-        df.to_excel(out_path, index=False)
+        # 取代 df.to_excel(out_path, index=False)：以 openpyxl write_only 串流寫入，輸出與原做法在儲存格層級
+        # 一致（工作表 Sheet1、標題列含 pandas 的粗體／細框線／置中樣式、無索引欄、NaN/None 以空字串
+        # 儲存格保留，全空欄仍保留）。
+        # 效能：openpyxl 逐格以純 Python 序列化 XML 是主要耗時，因此「全部欄位皆為浮點數」（本工具的
+        # 實際資料）時，標題列與活頁簿骨架仍由 openpyxl write_only 產生，資料列則直接輸出 <row>/<c> XML；
+        # 任何其他型別組合走一般的 write_only 路徑。兩條路徑與 df.to_excel 的比對結果見測試與 evidence。
+        import datetime as _dt
+        import io as _io
+        import zipfile as _zipfile
+        import numpy as np
+        from openpyxl import Workbook
+        from openpyxl.cell import Cell, WriteOnlyCell
+        from openpyxl.styles import Alignment, Border, Font, Side
+        from openpyxl.utils import get_column_letter
+        from pandas.api.types import is_bool, is_float, is_integer, is_scalar
+
+        inf = float("inf")
+        thin = Side(style="thin")
+
+        def convert(val, sheet):
+            # 與 pandas ExcelFormatter._format_value + ExcelWriter._value_with_fmt 相同的轉換規則
+            kind = type(val)
+            if kind is float:  # 最常見的情況（float32 欄經 tolist() 為 Python float）
+                if val != val:
+                    return ""
+                if val == inf:
+                    return "inf"
+                if val == -inf:
+                    return "-inf"
+                return val
+            if kind is int or kind is str or kind is bool:
+                return val
+            if is_scalar(val) and pd.isna(val):
+                return ""
+            if is_float(val):
+                if val == inf:
+                    return "inf"
+                if val == -inf:
+                    return "-inf"
+            if getattr(val, "tzinfo", None) is not None:
+                raise ValueError(
+                    "Excel does not support datetimes with "
+                    "timezones. Please ensure that datetimes "
+                    "are timezone unaware before writing to Excel."
+                )
+            if is_integer(val):
+                return int(val)
+            if is_float(val):
+                return float(val)
+            if is_bool(val):
+                return bool(val)
+            if isinstance(val, _dt.datetime):
+                number_format = "YYYY-MM-DD HH:MM:SS"
+            elif isinstance(val, _dt.date):
+                number_format = "YYYY-MM-DD"
+            elif isinstance(val, _dt.timedelta):
+                val = val.total_seconds() / 86400
+                number_format = "0"
+            else:
+                return str(val)
+            cell = WriteOnlyCell(sheet, value=val)
+            cell.number_format = number_format
+            return cell
+
+        def header_cell(label, sheet):
+            value = convert(label, sheet)
+            cell = value if isinstance(value, Cell) else WriteOnlyCell(sheet, value=value)
+            cell.font = Font(bold=True)
+            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            cell.alignment = Alignment(horizontal="center", vertical="top")
+            return cell
+
+        def write_general():
+            workbook = Workbook(write_only=True)
+            try:
+                sheet = workbook.create_sheet("Sheet1")
+                try:
+                    sheet.append([header_cell(label, sheet) for label in df.columns])
+                    columns = [df.iloc[:, i].tolist() for i in range(df.shape[1])]
+                    for row in zip(*columns):
+                        sheet.append([convert(val, sheet) for val in row])
+                except Exception:
+                    # 與 df.to_excel 相同：寫到一半失敗時已寫入的部分仍會存檔，例外照常向外拋出
+                    try:
+                        workbook.save(out_path)
+                    except Exception:
+                        pass
+                    raise
+                workbook.save(out_path)
+            finally:
+                workbook.close()
+
+        def write_all_float():
+            # 骨架（含標題列與樣式）由 openpyxl 產生，資料列 XML 直接串流寫入同一個 zip；
+            # 版面不符預期時回傳 False（尚未動到 out_path），由呼叫端改走一般路徑。
+            workbook = Workbook(write_only=True)
+            skeleton = _io.BytesIO()
+            try:
+                sheet = workbook.create_sheet("Sheet1")
+                sheet.append([header_cell(label, sheet) for label in df.columns])
+                workbook.save(skeleton)
+            finally:
+                workbook.close()
+            tail_marker = b"</sheetData>"
+            with _zipfile.ZipFile(skeleton) as source:
+                sheet_xml = source.read("xl/worksheets/sheet1.xml")
+                if sheet_xml.count(tail_marker) != 1 or b'<row r="1"' not in sheet_xml:
+                    return False
+                head, tail = sheet_xml.split(tail_marker)
+                letters = [get_column_letter(i + 1) for i in range(df.shape[1])]
+                columns = [df.iloc[:, i].tolist() for i in range(df.shape[1])]
+                with _zipfile.ZipFile(out_path, "w", _zipfile.ZIP_DEFLATED) as target:
+                    for item in source.infolist():
+                        if item.filename != "xl/worksheets/sheet1.xml":
+                            target.writestr(item, source.read(item.filename))
+                            continue
+                        entry = _zipfile.ZipInfo(item.filename, date_time=item.date_time)
+                        entry.compress_type = _zipfile.ZIP_DEFLATED
+                        with target.open(entry, "w") as stream:
+                            stream.write(head)
+                            pieces = []
+                            for number, row in enumerate(zip(*columns), start=2):
+                                cells = []
+                                for letter, val in zip(letters, row):
+                                    if val != val:  # NaN -> 空字串儲存格（與 pandas 相同）
+                                        cells.append('<c r="%s%d" t="inlineStr" />' % (letter, number))
+                                    elif val == inf or val == -inf:
+                                        cells.append('<c r="%s%d" t="inlineStr"><is><t>%s</t></is></c>'
+                                                     % (letter, number, "inf" if val > 0 else "-inf"))
+                                    else:
+                                        cells.append('<c r="%s%d" t="n"><v>%.16g</v></c>' % (letter, number, val))
+                                pieces.append('<row r="%d">%s</row>' % (number, "".join(cells)))
+                                if len(pieces) >= 2000:
+                                    stream.write("".join(pieces).encode("utf-8"))
+                                    pieces.clear()
+                            stream.write("".join(pieces).encode("utf-8"))
+                            stream.write(tail_marker + tail)
+            return True
+
+        all_float = df.shape[1] > 0 and all(
+            isinstance(dtype, np.dtype) and dtype.kind == "f" and dtype.itemsize <= 8 for dtype in df.dtypes)
+        if not (all_float and write_all_float()):
+            write_general()
         self.generated_excel_paths.append(out_path)
 
     def plot_and_save(self, df, filename, folder):
