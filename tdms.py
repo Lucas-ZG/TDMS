@@ -32,6 +32,8 @@ VERSION = "v3.8"
 from typing import List, Dict, Set, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
+import io
+import struct
 import sys
 import os
 import re
@@ -64,6 +66,83 @@ try:
     from nptdms import TdmsFile
 except ImportError:
     TdmsFile = None
+
+RECOVERED_SEGMENT_MESSAGE = "Recovered final TDMS segment using EOF"
+
+
+def _recover_final_segment(path: str):
+    """Repair only an understated final, fixed-width interleaved segment in memory."""
+    data = Path(path).read_bytes()
+    size = len(data)
+    position = 0
+    positions = []
+    file_version = None
+    while position + 28 <= size:
+        if data[position:position + 4] != b"TDSm":
+            return None
+        toc, version, next_offset, raw_offset = struct.unpack_from("<IIQQ", data, position + 4)
+        if toc not in (0x0E, 0x2E) or version not in (4712, 4713):
+            return None  # Only the simple little-endian metadata/raw-data layout is supported.
+        if file_version is not None and version != file_version:
+            return None
+        file_version = version
+        end = position + 28 + next_offset
+        raw_start = position + 28 + raw_offset
+        if not (position + 28 <= raw_start <= end <= size) or end <= position:
+            return None
+        positions.append(position)
+        if end == size:
+            return None  # A complete chain needs no repair.
+        if data[end:end + 4] == b"TDSm":
+            position = end
+            continue
+
+        # A missing header is recoverable only after the last declared segment.
+        if data.find(b"TDSm", end) != -1 or toc != 0x2E:
+            return None
+        try:
+            prefix = TdmsFile.read(io.BytesIO(data[:end]))
+            segments = prefix._reader._segments
+            if [segment.position for segment in segments] != positions:
+                return None
+            segment = segments[-1]
+            if (segment.data_position != raw_start or segment.next_segment_pos != end
+                    or segment.segment_incomplete):
+                return None
+            objects = segment.ordered_objects
+            if not objects or any(
+                type(obj).__name__ != "TdmsSegmentObject"
+                or not obj.has_data
+                or obj.number_values != 1
+                or obj.data_type.size is None
+                or obj.data_size != obj.data_type.size
+                for obj in objects
+            ):
+                return None
+            row_size = sum(obj.data_size for obj in objects)
+            if (row_size <= 0 or segment.final_chunk_lengths_override is not None
+                    or (end - raw_start) % row_size != 0
+                    or (size - end) % row_size != 0):
+                return None
+            repaired = bytearray(data)
+            struct.pack_into("<Q", repaired, position + 12, size - (position + 28))
+            return TdmsFile.read(io.BytesIO(repaired))
+        except Exception:
+            return None
+    return None
+
+
+def read_tdms_with_status(path: str):
+    """Return (TdmsFile, normal|recovered); let callers report failures."""
+    try:
+        return TdmsFile.read(path), "normal"
+    except ValueError as exc:
+        if not str(exc).startswith("Segment does not start with b'TDSm'"):
+            raise
+        recovered = _recover_final_segment(path)
+        if recovered is None:
+            raise
+        return recovered, "recovered"
 
 # ---- 名稱正規化 ----
 def _norm_group(s: str) -> str:
@@ -241,10 +320,15 @@ class TDMSFilterApp(QWidget):
             QMessageBox.critical(self, "錯誤", "尚未安裝 nptdms 套件"); self._rebuild_channel_checklist([]); return
 
         union_names = set()
+        failed_files = []
+        recovered_files = []
         for p in self.file_paths:
             try:
-                td = TdmsFile.read(p)
-            except Exception:
+                td, status = read_tdms_with_status(p)
+                if status == "recovered":
+                    recovered_files.append(os.path.basename(p))
+            except Exception as exc:
+                failed_files.append(f"{os.path.basename(p)}：{exc}")
                 continue
 
             matched = False
@@ -258,6 +342,16 @@ class TDMSFilterApp(QWidget):
                 for grp in self._all_groups(td):
                     try: union_names.update(ch.name for ch in grp.channels())
                     except Exception: pass
+
+        for name in recovered_files:
+            print(f"[{name}] {RECOVERED_SEGMENT_MESSAGE}")
+        if recovered_files:
+            QMessageBox.information(self, "TDMS 復原", "\n".join(
+                f"{name}：{RECOVERED_SEGMENT_MESSAGE}" for name in recovered_files))
+        if failed_files:
+            for failure in failed_files:
+                print(f"[TDMS 略過] {failure}")
+            QMessageBox.warning(self, "略過無法讀取的 TDMS", "\n".join(failed_files))
 
         # 排除 TIME 與四條
         exclude = set(self.base_channels)
@@ -346,14 +440,14 @@ class TDMSFilterApp(QWidget):
         return None, None
 
     # ---------------- 讀檔 / 匯出 / 畫圖 ----------------
-    def read_tdms_file(self, path: str) -> pd.DataFrame:
-        """讀取 TDMS 檔案並轉換為 DataFrame。
+    def read_tdms_file(self, path: str) -> Tuple[pd.DataFrame, str]:
+        """讀取 TDMS 檔案並轉換為 DataFrame，回傳 normal/recovered 狀態。
 
         Args:
             path: TDMS 檔案路徑
 
         Returns:
-            包含所需通道資料的 DataFrame
+            (包含所需通道資料的 DataFrame, 讀取狀態)
 
         Raises:
             ImportError: 未安裝 nptdms
@@ -367,9 +461,9 @@ class TDMSFilterApp(QWidget):
             raise FileNotFoundError(f"找不到檔案：{path}")
 
         try:
-            td = TdmsFile.read(path)
+            td, read_status = read_tdms_with_status(path)
         except Exception as e:
-            raise ValueError(f"無法讀取 TDMS 檔案：{e}")
+            raise ValueError(f"無法讀取 TDMS 檔案：{e}") from e
 
         # ⚠️ 核心：當下讀 UI 勾選
         extras_now = self._get_checked_extra_channels()
@@ -432,7 +526,7 @@ class TDMSFilterApp(QWidget):
             print(f"[{os.path.basename(path)}] 找到: {sorted(found)}；找不到: {sorted(missed)}")
         else:
             print(f"[{os.path.basename(path)}] 找到: {sorted(found)}")
-        return df
+        return df, read_status
 
     def export_to_excel(self, df, tdms_path):
         # 全欄輸出（包含空欄）
@@ -527,11 +621,17 @@ class TDMSFilterApp(QWidget):
 
         for path in self.file_paths:
             try:
-                df = self.read_tdms_file(path)
+                df, status = self.read_tdms_file(path)
+                if status == "recovered":
+                    message = f"{os.path.basename(path)}：{RECOVERED_SEGMENT_MESSAGE}"
+                    print(message)
+                    QMessageBox.information(self, "TDMS 復原", message)
                 if self.enable_excel.isChecked(): self.export_to_excel(df, path)
                 self.plot_and_save(df, os.path.basename(path), os.path.dirname(path))
             except Exception as e:
-                QMessageBox.critical(self, "錯誤", f"處理檔案 {path} 時發生錯誤：\n{e}")
+                message = f"{os.path.basename(path)}：{e}"
+                print(f"[TDMS 略過] {message}")
+                QMessageBox.critical(self, "錯誤", message)
 
         if self.enable_excel.isChecked() and self.auto_open_excel.isChecked():
             self.open_files(self.generated_excel_paths)

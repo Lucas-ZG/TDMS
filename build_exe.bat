@@ -3,6 +3,16 @@
 chcp 65001 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 
+:: 先固定目前環境的 Python 絕對路徑，再縮小打包時的 DLL 搜尋 PATH。
+:: 避免外部工具（例如 Poppler）同名 DLL 被 PyInstaller 誤收進成品。
+for %%I in (python.exe) do set "PYTHON_EXE=%%~$PATH:I"
+
+if not defined PYTHON_EXE (
+    echo ❌ 找不到 python。請先安裝或啟用正確的 Python 環境。
+    pause
+    exit /b
+)
+
 echo 🔍 搜尋當前資料夾內的 .py 檔案...
 
 set "count=0"
@@ -19,8 +29,8 @@ if %count%==0 (
     exit /b
 )
 
-:: 檢查 pyinstaller 是否可用
-where pyinstaller >nul 2>&1
+:: 檢查目前 Python 環境內的 PyInstaller 是否可用
+"%PYTHON_EXE%" -m PyInstaller --version >nul 2>&1
 if errorlevel 1 (
     echo ❌ 找不到 pyinstaller。請先：pip install pyinstaller
     pause
@@ -99,9 +109,14 @@ rmdir /s /q build >nul 2>&1
 rmdir /s /q dist >nul 2>&1
 del /f /q "%BASENAME%.spec" >nul 2>&1
 
-:: 執行打包（無主控台、單檔）
-pyinstaller --noconsole --onefile "%PYFILE%"
-if errorlevel 1 (
+:: 執行打包（無主控台、單檔）。只保留 Windows 系統 DLL 搜尋路徑，
+:: Python 與套件由上方固定的直譯器絕對路徑提供。
+set "ORIGINAL_PATH=%PATH%"
+set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem"
+"%PYTHON_EXE%" -m PyInstaller --clean --noconfirm --noconsole --onefile "%PYFILE%"
+set "BUILD_EXIT=!ERRORLEVEL!"
+set "PATH=%ORIGINAL_PATH%"
+if not "!BUILD_EXIT!"=="0" (
     echo ❌ 打包失敗: "%PYFILE%"
     goto :EOF
 )
